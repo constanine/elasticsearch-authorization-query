@@ -1,0 +1,265 @@
+allprojects {
+	apply plugin: 'eclipse'
+	apply plugin: 'idea'
+
+	repositories {
+		mavenLocal()
+		mavenCentral()
+	}
+}
+
+/** Directory name to store jar files */
+def DIST_JARS = 'jars'
+/** Directory name to store source jar files */
+def DIST_SRCS = 'srcs'
+
+/**
+ * Check is Windows or not
+ */
+def isWindows(){
+	if (System.getProperty("os.name").toUpperCase().indexOf("WINDOWS") != -1){
+		return true;
+	}else{
+	    return false;
+	}
+}
+
+/**
+ * Check the path is absolute or not
+ */
+def isAbsolutePath(path){
+	if (null==path){
+		return false;
+	}
+	path = path.trim();
+	
+	if (path.startsWith('/')){
+		return true;
+	}
+	if (isWindows() && path.startsWith('\\')){
+		return true;
+	}
+
+	def roots = File.listRoots()
+	for(def i=0; i<roots.length; i++){
+		def root = roots[i].getCanonicalPath();
+		if (isWindows()){
+			root = root.toUpperCase()
+			path = path.toUpperCase()
+		}
+		if (path.startsWith(root)){
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Guess the full path of ".gradle" file in the calling stack
+ */
+def detectPathFromCallStack(relativePath){
+	def stacks = Thread.currentThread().stackTrace
+	def counter = 0
+	def callPoint = null;
+	for(def i=0; i<stacks.length; i++){
+		def fileName = stacks[i].fileName;
+		if (null!=fileName && fileName.endsWith(".gradle")){
+			logger.debug("[DevOps] Find `.gradle` file in calling stack: `${fileName}` ...")
+			counter ++
+			if (counter == 3){
+				callPoint = fileName
+				logger.debug("[DevOps] Found: `${relativePath}` at `${callPoint}`")
+				break
+			}
+		}
+	}
+	if (null==callPoint){
+		throw new RuntimeException("Can't find the full path for `${relativePath}` - call point not found")
+	}
+	
+	//Now the relativePath is based on callPoint
+	callPoint = new File(callPoint)
+	def baseDir = callPoint.getParentFile()
+	def absFile = new File(baseDir, relativePath)
+	def result = absFile.getCanonicalPath()
+	
+	logger.debug("[DevOps] Based on call point: `${relativePath}` ==> `${result}`")
+	return result;
+}
+
+project.ext.devOpsConfigs_Store = [:]; //Empty Map
+/**
+ * Define the devOps configurations(Key-Value pairs).
+ */
+ext.devOpsConfig = { params ->
+	params.each { it ->
+		project.ext.devOpsConfigs_Store.put(it.key, it.value)
+		logger.warn("[DevOps] Configuration: `${it.key}` = `${it.value}`")
+	}
+}
+/**
+ * Get the value of configuation item by key
+ */
+ext.devOpsConfigValue = { key ->
+	return project.ext.devOpsConfigs_Store.get(key)
+}
+
+/**
+ * Extend "apply" for gradle, to detect relative path based on the apply point
+ */
+ext.devOpsApply = { params ->
+	logger.info("[DevOps] apply `${params}` ...")
+	def _from = params.get('from')
+	if (null!=_from){
+		if (! isAbsolutePath(_from)){
+			logger.debug("[DevOps] `${_from}` is relative path, to find it's full path ...")
+			def fullPath = detectPathFromCallStack(_from)
+			params.put('from', fullPath)
+		}
+	}
+	logger.lifecycle("[DevOps] apply `${params}` .")
+	apply params
+}
+
+/**
+ * Extend "fileTree" for gradle, to detect relative path based on the apply point
+ */
+ext.devOpsFileTree = { params ->
+	logger.info("[DevOps] fileTree `${params}` ...")
+	def _dir = params.get("dir")
+	if (null!=_dir){
+		if (! isAbsolutePath(_dir)){
+			logger.debug("[DevOps] `${_dir}` is relative path, to find it's full path ...")
+			def fullPath = detectPathFromCallStack(_dir)
+			params.put('dir', fullPath)
+		}
+	}
+	logger.lifecycle("[DevOps] fileTree `${params}` .")
+	fileTree params
+}
+
+project.ext.devOps_CopyLibs_Enabled = false
+project.ext.devOps_CopyLibs_Include = '*.jar';
+project.ext.devOps_CopyLibs_Exclude = '';
+/**
+ * Define the include and exclude to export runtime dependences into ${distsDirName}/libs directory
+ */
+ext.devOpsDefineExports = { params ->
+	project.ext.devOps_CopyLibs_Enabled = true
+	
+	def include = params.get("include");
+	if (null!=include){
+		project.ext.devOps_CopyLibs_Include = include
+	}
+	
+	def exclude = params.get("exclude");
+	if (null!=exclude){
+		project.ext.devOps_CopyLibs_Exclude = exclude
+	}
+}
+//FIXME: Can't get the real-time value of project.ext.*(or System property or project property) in task,
+//        MUST use "doLast" hook on an existed task.
+tasks.jar.doLast(){
+	if (project.ext.devOps_CopyLibs_Enabled){
+		logger.lifecycle("[DevOps] copy dependences into '${distsDirName}/libs',"
+			            +" include=[${project.ext.devOps_CopyLibs_Include}], "
+						+" exclude=[${project.ext.devOps_CopyLibs_Exclude}].")
+		copy {
+			from configurations.runtime
+			into "${distsDirName}/libs"
+			include project.ext.devOps_CopyLibs_Include
+			exclude project.ext.devOps_CopyLibs_Exclude
+		}
+	}
+
+
+}
+
+/**
+ * Update the name of eclipse project
+ */
+eclipse {
+	project {
+		name = "gradle-${project.name}"
+	}
+}
+
+/**
+ * Modify eclipse .classpath file to make it fit current project layout
+ */
+eclipse.classpath.file {
+	withXml { xml ->
+		def node = xml.asNode()
+		
+		//Ignore the dependencies of current project
+		//(always like "compile devOpsFileTree(dir: "dist/jars", include: ['*.jar'])")
+		node.classpathentry.each{
+			def distJarDir = "${distsDir.canonicalPath}/${DIST_JARS}";
+			def jarPath = it.@path;
+			if ('lib'==it.@kind && jarPath.startsWith(distJarDir)){
+				logger.info("[DevOps] Eclipse classpathentry update: remove classpath of self-dist: `${jarPath}` .")
+				def p = it.parent()
+				p.remove(it)
+			}
+		}
+		//Attach source jars for local dependencies
+		node.classpathentry.each{
+			if ('lib'==it.@kind && null==it.@sourcepath){
+				def jarPath = it.@path
+				def jarsDir = "/${DIST_JARS}/"
+				def jarsIndex = jarPath.lastIndexOf(jarsDir)
+				if (jarsIndex>0){
+					def dirDist = jarPath.substring(0, jarsIndex)
+					def jarName = jarPath.substring(jarsIndex+jarsDir.length())
+					def srcjarName = jarName.substring(0, jarName.length()-".jar".length())+"-sources.jar"
+					def srcJarPath = dirDist + "/${DIST_SRCS}/" + srcjarName
+					def srcJarFile = new File(srcJarPath)
+					if (srcJarFile.exists()){
+						it.@sourcepath = srcJarPath
+						logger.info("[DevOps] Eclipse classpathentry update: sourcepath `${srcJarPath}` for `${it.@path}` .")
+						def attrsNode = it.appendNode("attributes");
+						def attrNode = attrsNode.appendNode("attribute");
+						attrNode.@name = "source_encoding";
+						attrNode.@value = "UTF-8";
+					}
+				}
+			}
+		}
+	}
+}
+
+/**
+ * Force eclipse resource encoding to UTF-8;
+ * ref: https://issues.gradle.org/browse/GRADLE-1010
+ */
+eclipseJdt << {
+    File f = file('.settings/org.eclipse.core.resources.prefs')
+    f.write('eclipse.preferences.version=1\n')
+    f.append('encoding/<project>=UTF-8')
+}
+
+task devOpsSourceJar(type: Jar, dependsOn: classes) {
+	classifier = 'sources'
+	from sourceSets.main.allSource
+}
+
+task devOpsClean(type: Delete) {
+	delete buildDir
+	delete distsDir
+}
+
+task devOpsDistJar(type: Copy, dependsOn: [jar]) {
+	from libsDir
+	into "${distsDir.canonicalPath}/${DIST_JARS}"
+	include '*.jar' exclude '*-sources.jar'
+}
+
+task devOpsDistSrcJar(type: Copy, dependsOn: [devOpsSourceJar]) {
+	from libsDir
+	into "${distsDir.canonicalPath}/${DIST_SRCS}"
+	include '*-sources.jar'
+}
+
+task devOpsDist(type: Copy, dependsOn: [devOpsClean, devOpsDistJar, devOpsDistSrcJar]) {
+	//Do nothing
+}

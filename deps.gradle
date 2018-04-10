@@ -1,0 +1,14 @@
+dependencies {
+  // https://mvnrepository.com/artifact/org.elasticsearch/elasticsearch
+  compile group: 'org.elasticsearch', name: 'elasticsearch', version: '6.2.2'
+    // https://mvnrepository.com/artifact/com.google.guava/guava
+  compile group: 'com.google.guava', name: 'guava', version: '15.0'
+  // https://mvnrepository.com/artifact/org.apache.logging.log4j/log4j-api
+  compile group: 'org.apache.logging.log4j', name: 'log4j-api', version: '2.7'
+  // https://mvnrepository.com/artifact/log4j/log4j
+  compile group: 'log4j', name: 'log4j', version: '1.2.17'
+  // https://mvnrepository.com/artifact/org.apache.logging.log4j/log4j-core
+  compile group: 'org.apache.logging.log4j', name: 'log4j-core', version: '2.7'
+  // https://mvnrepository.com/artifact/com.alibaba/fastjson
+  compile group: 'com.alibaba', name: 'fastjson', version: '1.2.5'
+}

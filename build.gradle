@@ -1,0 +1,31 @@
+apply plugin: 'eclipse'
+apply plugin: 'java'
+apply plugin: 'idea'
+apply plugin: 'maven'
+
+description 'elasticsearch6.2.2的权限查询插件'
+group = 'org.xialj.elasticsearch.plugin.accesscontrol'
+version = '6.2.2'
+
+defaultTasks 'devOpsDist'
+sourceCompatibility = 1.8
+compileJava.options.encoding = 'UTF-8'
+
+distsDirName = "${projectDir}/dist"
+repositories {
+  /* ... Any other repositories ... */
+
+  // Add the Elasticsearch Maven Repository
+  maven {
+    url "https://artifacts.elastic.co/maven"
+  }
+}
+
+distsDirName = "${projectDir}/dist"
+//从 `boke-devops.gradle` 引用自定义的方法和任务
+apply from: "devops.gradle"
+devOpsApply from: "deps.gradle"
+
+eclipse.project.name = "elasticsearch-query-access-control"
+
+

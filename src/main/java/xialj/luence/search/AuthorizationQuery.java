@@ -1,41 +1,48 @@
 package xialj.luence.search;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 
-import org.apache.lucene.index.IndexReaderContext;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.PostingsEnum;
-import org.apache.lucene.index.ReaderUtil;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.TermContext;
 import org.apache.lucene.index.TermState;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.search.ConstantScoreScorer;
+import org.apache.lucene.search.DocIdSet;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.TwoPhaseIterator;
 import org.apache.lucene.search.Weight;
+import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.DocIdSetBuilder;
+
+import xialj.luence.search.bean.AuthorizationUnit;
 
 public class AuthorizationQuery extends Query {
 	private final Term term;
-	private final TermContext perReaderTermState;
 
 	final class AccessControlQueryWeight extends Weight {
-		private final TermContext termContext;
-		private final boolean needsScores;
+		private final float score;
+		private final Term condTerm;
 
-		public AccessControlQueryWeight(IndexSearcher searcher, boolean needsScores, float boost,
-				TermContext termContext) throws IOException {
+		public AccessControlQueryWeight(IndexSearcher searcher, boolean needsScores, float boost, Term term)
+				throws IOException {
 			super(AuthorizationQuery.this);
-			if (needsScores && termContext == null) {
+			if (needsScores && term == null) {
 				throw new IllegalStateException("termStates are required when scores are needed");
 			}
-			this.needsScores = needsScores;
-			this.termContext = termContext;
+			this.score = boost;
+			this.condTerm = term;
 		}
 
 		@Override
@@ -50,57 +57,96 @@ public class AuthorizationQuery extends Query {
 
 		@Override
 		public Explanation explain(LeafReaderContext context, int doc) throws IOException {
-			AuthorizationScorer scorer = (AuthorizationScorer) scorer(context);
-			if (scorer != null) {
-				int newDoc = scorer.iterator().advance(doc);
-				if (newDoc == doc) {
-					float freq = scorer.freq();
-					Explanation freqExplanation = Explanation.match(freq, "AuthorizationFreq=" + freq);
-					return freqExplanation;
+			final Scorer s = scorer(context);
+			final boolean exists;
+			if (s == null) {
+				exists = false;
+			} else {
+				final TwoPhaseIterator twoPhase = s.twoPhaseIterator();
+				if (twoPhase == null) {
+					exists = s.iterator().advance(doc) == doc;
+				} else {
+					exists = twoPhase.approximation().advance(doc) == doc && twoPhase.matches();
 				}
 			}
-			return Explanation.noMatch("no matching term");
+			if (exists) {
+				return Explanation.match(score, getQuery().toString() + (score == 1f ? "" : "^" + score));
+			} else {
+				return Explanation.noMatch(getQuery().toString() + " doesn't match id " + doc);
+			}
 		}
 
 		@Override
 		public Scorer scorer(LeafReaderContext context) throws IOException {
-			final TermsEnum termsEnum = getTermsEnum(context);
-			if (termsEnum == null) {
-				return null;
-			}
-			PostingsEnum docs = termsEnum.postings(null, needsScores ? PostingsEnum.FREQS : PostingsEnum.NONE);
-			assert docs != null;
-			return new AuthorizationScorer(this, docs, term);
+			final LeafReader reader = context.reader();
+			final Terms terms = reader.terms(term.field());
+			List<TermAndState> collectedTerms = _collectEffectTerms(context, terms, this.condTerm);
+			return _scorer(_buildDocIdSet(reader, terms, collectedTerms));
 		}
 
-		private TermsEnum getTermsEnum(LeafReaderContext context) throws IOException {
-			if (termContext != null) {
-				// TermQuery either used as a Query or the term states have been
-				// provided at construction time
-				assert termContext.wasBuiltFor(ReaderUtil.getTopLevelContext(
-						context)) : "The top-reader used to create Weight is not the same as the current reader's top-reader ("
-								+ ReaderUtil.getTopLevelContext(context);
-				final TermState state = termContext.get(context.ord);
-				if (state == null) { // term is not present in that reader
-					assert termNotInReader(context.reader(),
-							term) : "no termstate found but term exists in reader term=" + term;
-					return null;
-				}
-				final TermsEnum termsEnum = context.reader().terms(term.field()).iterator();
-				termsEnum.seekExact(term.bytes(), state);
-				return termsEnum;
-			} else {
-				Terms terms = context.reader().terms(term.field());
-				if (terms == null) {
-					return null;
-				}
-				final TermsEnum termsEnum = terms.iterator();
-				if (termsEnum.seekExact(term.bytes())) {
-					return termsEnum;
-				} else {
-					return null;
+		private boolean _checkPermission(BytesRef termVal, String condText) {
+
+			String authStr = Term.toString(termVal);
+
+			Set<AuthorizationUnit> authUnits = AuthorizationUnitTools.parse(authStr);
+			Set<AuthorizationUnit> condUnits = AuthorizationUnitTools.parse(condText);
+
+			for (AuthorizationUnit authUnit : authUnits) {
+				String curauthName = authUnit.getName();
+				for (AuthorizationUnit condUnit : condUnits) {
+					if (curauthName.equals(condUnit.getName())) {
+						if (condUnit.getValues().containsAll(authUnit.getValues())) {
+							break;
+						} else {
+							return false;
+						}
+					}
 				}
 			}
+			return true;
+		}
+
+		private List<TermAndState> _collectEffectTerms(LeafReaderContext context, Terms terms, Term condTerm)
+				throws IOException {
+			List<TermAndState> result = new ArrayList<TermAndState>();
+			TermsEnum termsEnum = terms.iterator();
+			BytesRef curTermVal = termsEnum.next();
+			while (null != curTermVal) {
+				String condStr = condTerm.text();
+				if ("-1".equals(condStr) || "all".equals(condStr) || _checkPermission(curTermVal, condStr)) {
+					TermState state = termsEnum.termState();
+					TermAndState t = new TermAndState(curTermVal, state);
+					result.add(t);
+				}
+				curTermVal = termsEnum.next();
+			}
+			return result;
+		}
+
+		private DocIdSet _buildDocIdSet(LeafReader reader, Terms terms, List<TermAndState> collectedTerms)
+				throws IOException {
+			TermsEnum termsEnum2 = terms.iterator();
+			PostingsEnum docs = null;
+			DocIdSetBuilder builder = new DocIdSetBuilder(reader.maxDoc(), terms);
+			if (collectedTerms.isEmpty() == false) {
+				for (TermAndState t : collectedTerms) {
+					termsEnum2.seekExact(t.term, t.state);
+					docs = termsEnum2.postings(docs, PostingsEnum.NONE);
+					builder.add(docs);
+				}
+			}
+			return builder.build();
+		}
+
+		private Scorer _scorer(DocIdSet set) throws IOException {
+			if (set == null) {
+				return null;
+			}
+			final DocIdSetIterator disi = set.iterator();
+			if (disi == null) {
+				return null;
+			}
+			return new ConstantScoreScorer(this, this.score, disi);
 		}
 
 		@Override
@@ -111,13 +157,11 @@ public class AuthorizationQuery extends Query {
 
 	public AuthorizationQuery(Term term) {
 		this.term = Objects.requireNonNull(term);
-		this.perReaderTermState = null;
 	}
 
 	public AuthorizationQuery(Term term, TermContext states) {
 		assert states != null;
 		this.term = Objects.requireNonNull(term);
-		this.perReaderTermState = Objects.requireNonNull(states);
 	}
 
 	public Term getTerm() {
@@ -125,25 +169,7 @@ public class AuthorizationQuery extends Query {
 	}
 
 	public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
-		final IndexReaderContext context = searcher.getTopReaderContext();
-		final TermContext termState;
-		if (perReaderTermState == null || perReaderTermState.wasBuiltFor(context) == false) {
-			if (needsScores) {
-				// make TermQuery single-pass if we don't have a PRTS or if the
-				// context
-				// differs!
-				termState = TermContext.build(context, term);
-			} else {
-				// do not compute the term state, this will help save seeks in
-				// the terms
-				// dict on segments that have a cache entry for this query
-				termState = null;
-			}
-		} else {
-			// PRTS was pre-build for this IS
-			termState = this.perReaderTermState;
-		}
-		return new AccessControlQueryWeight(searcher, needsScores, boost, termState);
+		return new AccessControlQueryWeight(searcher, needsScores, boost, this.term);
 	}
 
 	@Override
@@ -178,7 +204,13 @@ public class AuthorizationQuery extends Query {
 		return classHash() ^ term.hashCode();
 	}
 
-	private boolean termNotInReader(LeafReader reader, Term term) throws IOException {
-		return reader.docFreq(term) == 0;
+	private static class TermAndState {
+		final BytesRef term;
+		final TermState state;
+
+		TermAndState(BytesRef term, TermState state) {
+			this.term = term;
+			this.state = state;
+		}
 	}
 }

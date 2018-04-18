@@ -76,7 +76,7 @@ public class AuthorizationQueryBuilder extends AbstractQueryBuilder<Authorizatio
             } else if (token.isValue()) {
                 throwParsingExceptionOnMultipleFields(NAME, parser.getTokenLocation(), fieldName, parser.currentName());
                 fieldName = currentFieldName;
-                value = parser.objectBytes();
+                value = parser.objectText();
             } else if (token == XContentParser.Token.START_ARRAY) {
                 throw new ParsingException(parser.getTokenLocation(), "["+NAME+"] query does not support array of values");
             }
@@ -118,7 +118,7 @@ public class AuthorizationQueryBuilder extends AbstractQueryBuilder<Authorizatio
 	}
 
 	@Override
-	protected boolean doEquals(AuthorizationQueryBuilder other) {		
+	protected boolean doEquals(AuthorizationQueryBuilder other) {
 		return (this.fieldName.equals(other.fieldName)
 				&& this.value.equals(other.value));
 	}

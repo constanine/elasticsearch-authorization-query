@@ -1,3 +1,5 @@
+apply plugin: 'java'
+
 description 'elasticsearch6.2.2的权限查询插件'
 group = 'org.xialj.elasticsearch.plugin.accesscontrol'
 version = '6.2.2'
